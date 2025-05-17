@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+playwright>=1.44.0
+browserbase>=0.5.0
+openai
