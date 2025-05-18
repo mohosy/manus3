@@ -23,7 +23,8 @@ app.add_middleware(
         "https://www.pasadena.edu",  # PCC main site
         "https://pasadena.edu",      # root domain (no www)
     ],
-    allow_methods=["POST"],
+    allow_credentials=True,          # allow cookies / auth headers
+    allow_methods=["*"],           # accept OPTIONS, POST, GET, etc.
     allow_headers=["*"],
 )
 
