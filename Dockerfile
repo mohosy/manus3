@@ -9,5 +9,6 @@ COPY manus_client.py app.py requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt \
     && playwright install chromium --with-deps
 
-ENV PORT=8000
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+# 🔥 Railway injects its own $PORT env var at runtime.
+#    Listen on that instead of hard‑coding 8000.
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "$PORT"]
