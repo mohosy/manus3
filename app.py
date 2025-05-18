@@ -23,8 +23,7 @@ app.add_middleware(
         "https://www.pasadena.edu",  # PCC main site
         "https://pasadena.edu",      # root domain (no www)
     ],
-    allow_credentials=True,          # allow cookies / auth headers
-    allow_methods=["*"],           # accept OPTIONS, POST, GET, etc.
+    allow_methods=["POST", "OPTIONS"],   # ← include OPTIONS for pre-flight
     allow_headers=["*"],
 )
 
@@ -49,7 +48,7 @@ async def ask_endpoint(req: AskRequest):
     loop = asyncio.get_event_loop()
     try:
         payload = await loop.run_in_executor(None, agent.ask_manus, req.prompt)
-        return payload                      # already {"logs": [...], "answer": "..."}
+        return payload
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
