@@ -96,17 +96,20 @@ class ManusClient:
             return answer
 
     # ------- internal (stream) ------
-    async def _stream_interact_with_manus(self, prompt: str) -> AsyncGenerator[Dict[str, str], None]:
-        prompt = (
-            "Context: You are answering on behalf of Pasadena City College (PCC). "
-            "Most questions relate to PCC programs, admissions, resources, student life, etc. "
-            "Provide PCC‑specific information whenever relevant.\n\n"
-            + prompt
-            + PROMPT_TAIL
-        )
-        yield {"type": "log", "message": "🚀 spinning up remote chromium session on Browserbase…"}
 
-        session = bb.sessions.create(project_id=BB_PROJECT_ID)
+async def _stream_interact_with_manus(self, prompt: str) -> AsyncGenerator[Dict[str, str], None]:
+    prompt = (
+        "Context: You are answering on behalf of Pasadena City College (PCC). "
+        "Most questions relate to PCC programs, admissions, resources, student life, etc. "
+        "Provide PCC‑specific information whenever relevant.\n\n"
+        + prompt
+        + PROMPT_TAIL
+    )
+    yield {"type": "log", "message": "🚀 spinning up remote chromium session on Browserbase…"}
+
+    session = bb.sessions.create(project_id=BB_PROJECT_ID)
+    sid = session.id
+    try:
         yield {"type": "log", "message": f"🔗 connected. live view: https://browserbase.com/sessions/{session.id}"}
 
         async with async_playwright() as p:
@@ -128,13 +131,17 @@ class ManusClient:
             async for l in self._manus_login_stream(page):
                 yield l
 
+            # prompt / answer
             async for chunk in self._send_prompt_stream(page, prompt):
                 yield chunk
 
             await browser.close()
             yield {"type": "log", "message": "✅ remote browser closed."}
-
-    # -------- login helpers ---------
+    finally:
+        try:
+            bb.sessions.delete(project_id=BB_PROJECT_ID, session_id=sid)
+        except Exception:
+            pass
     async def _google_login(self, page, context, log):
         log("🔐 performing one‑time Google login…")
         await page.goto("https://accounts.google.com/signin/v2/identifier?service=mail")
