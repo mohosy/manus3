@@ -58,36 +58,31 @@ def _init_db() -> None:
     cur.execute(
         """CREATE TABLE IF NOT EXISTS scheduled_jobs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                fire_at TEXT NOT NULL,
-                prompt  TEXT NOT NULL,
-                status  TEXT NOT NULL DEFAULT 'pending',
-                answer  TEXT
-            )""")
-    conn.commit()
-    conn.close()
-
-class ManusClient:
-    """
-    Cloud‑browser wrapper around Manus.AI.
-    ask_manus(prompt)  -> {'logs': [...], 'answer': '...'}
-    stream_manus(...)  -> async generator chunks (log / answer)
-    """
+                fire_at   TEXT NOT NULL,
+                prompt    TEXT NOT NULL,
+                status    TEXT NOT NULL DEFAULT 'pending',
+                answer    TEXT,
+                session_id TEXT NOT NULL
+        )""")
 # -------- scheduling wrapper ---------------------------------
-def ask_or_schedule(self, nl_command: str):
-    """If the text contains a future time, schedule the job, else run now."""
+def ask_or_schedule(self, nl_command: str, session_id: str | None = None):
+    """If text includes a future time, schedule; else run immediately."""
     dt_fire, pure_prompt = self._extract_schedule(nl_command)
     if dt_fire and dt_fire > datetime.now():
-        job_id = self._schedule_job(pure_prompt, dt_fire)
+        if session_id is None:
+            session_id = "anon"
+        job_id = self._schedule_job(pure_prompt, dt_fire, session_id)
         return {
             "logs": [],
             "answer": f"🗓️ locked in for {dt_fire:%a %b %d @ %I:%M%p}. job #{job_id}"
         }
+    # immediate
     return self.ask_manus(nl_command)
 
 # -------- helper: parse natural language date ----------------
 @staticmethod
 def _extract_schedule(nl_text: str):
-    res = search_dates(
+    results = search_dates(
         nl_text,
         settings={
             "TIMEZONE": PST,
@@ -95,21 +90,21 @@ def _extract_schedule(nl_text: str):
             "PREFER_DATES_FROM": "future",
         },
     )
-    if not res:
+    if not results:
         return None, nl_text
-    for phrase, dt_obj in res:
+    for phrase, dt_obj in results:
         if dt_obj > datetime.now():
             stripped = nl_text.replace(phrase, "").strip(", ").lstrip()
             return dt_obj, stripped
     return None, nl_text
 
 # -------- helper: save + APScheduler -------------------------
-def _schedule_job(self, prompt: str, fire_at: datetime) -> int:
+def _schedule_job(self, prompt: str, fire_at: datetime, session_id: str) -> int:
     conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
+    cur  = conn.cursor()
     cur.execute(
-        "INSERT INTO scheduled_jobs(fire_at, prompt, status) VALUES (?,?,?)",
-        (fire_at.isoformat(), prompt, "pending"),
+        "INSERT INTO scheduled_jobs(fire_at,prompt,status,session_id) VALUES (?,?,?,?)",
+        (fire_at.isoformat(), prompt, "pending", session_id)
     )
     job_id = cur.lastrowid
     conn.commit()
@@ -119,25 +114,29 @@ def _schedule_job(self, prompt: str, fire_at: datetime) -> int:
                   trigger="date",
                   id=str(job_id),
                   next_run_time=fire_at,
-                  args=[prompt, job_id])
+                  args=[prompt, job_id, session_id])
     return job_id
 
 # -------- background job runner ------------------------------
 @staticmethod
-async def _run_manus_job_static(prompt: str, job_id: int):
+async def _run_manus_job_static(prompt: str, job_id: int, session_id: str):
     cli = ManusClient()
     res = cli.ask_manus(prompt)
     answer_json = json.dumps(res, ensure_ascii=False)
     conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
+    cur  = conn.cursor()
     cur.execute(
         "UPDATE scheduled_jobs SET status='done', answer=? WHERE id=?",
         (answer_json, job_id)
     )
     conn.commit()
     conn.close()
-    # TODO: push result back to chat
-
+    # TODO: emit to websocket room f"session:{session_id}"
+    """
+    Cloud‑browser wrapper around Manus.AI.
+    ask_manus(prompt)  -> {'logs': [...], 'answer': '...'}
+    stream_manus(...)  -> async generator chunks (log / answer)
+    """
 
     # -------- public (batch) --------
     def ask_manus(self, prompt: str) -> Dict[str, List[str]]:
@@ -358,23 +357,80 @@ async def _stream_interact_with_manus(self, prompt: str) -> AsyncGenerator[Dict[
     def _strip_end_token(text: str) -> str:
         return re.sub(r"(^|\s)END(\s|[.!?]|$)", "", text).rstrip()
 
-
 def _load_pending_jobs():
     conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
+    cur  = conn.cursor()
     now_iso = datetime.now().isoformat()
     rows = cur.execute(
-        "SELECT id, fire_at, prompt FROM scheduled_jobs WHERE status='pending' AND fire_at > ?", (now_iso,)
+        "SELECT id, fire_at, prompt, session_id FROM scheduled_jobs WHERE status='pending' AND fire_at > ?",
+        (now_iso,)
     ).fetchall()
     conn.close()
-    for job_id, fire_at, prompt in rows:
+    for job_id, fire_at, prompt, session_id in rows:
         when = datetime.fromisoformat(fire_at)
         sched.add_job(ManusClient._run_manus_job_static,
                       trigger="date",
                       id=str(job_id),
                       next_run_time=when,
-                      args=[prompt, job_id])
+                      args=[prompt, job_id, session_id])
 
-# init DB and load jobs when module imported
+# initialize
 _init_db()
 _load_pending_jobs()
+# ------------------------------------------------------------------
+# 🔧 Thin wrapper-class binding the standalone functions above
+#     back into the OO interface expected elsewhere in the codebase.
+# ------------------------------------------------------------------
+
+class ManusClient:
+    """Restored OO wrapper around the functional implementation above.
+
+    Keeping the heavy lifting as‑is, we just delegate each public / helper
+    call to its original top‑level function so existing imports like
+
+        from manus_client import ManusClient
+
+    keep working without refactoring 6000+ lines.
+    """
+
+    # ------- public (batch) -------
+    def ask_manus(self, prompt: str):
+        return ask_manus(self, prompt)
+
+    # ------- public (stream) ------
+    async def stream_manus(self, prompt: str):
+        async for chunk in stream_manus(self, prompt):
+            yield chunk
+
+    # ------- scheduling ----------
+    def ask_or_schedule(self, nl_command: str, session_id: str | None = None):
+        return ask_or_schedule(self, nl_command, session_id)
+
+    # ------- helper delegates ----
+    def _extract_schedule(self, nl_text: str):
+        return _extract_schedule(nl_text)
+
+    def _schedule_job(self, prompt: str, fire_at, session_id: str):
+        return _schedule_job(self, prompt, fire_at, session_id)
+
+    async def _interact_with_manus(self, prompt: str, log):
+        return await _interact_with_manus(self, prompt, log)
+
+    async def _stream_interact_with_manus(self, prompt: str):
+        async for chunk in _stream_interact_with_manus(self, prompt):
+            yield chunk
+
+    # ------- text utils ----------
+    def _has_error(self, text: str):
+        return _has_error(text)
+
+    def _has_end(self, text: str):
+        return _has_end(text)
+
+    def _strip_end_token(self, text: str):
+        return _strip_end_token(text)
+
+    # ------- static job runner ---
+    @staticmethod
+    async def _run_manus_job_static(prompt: str, job_id: int, session_id: str):
+        await _run_manus_job_static(prompt, job_id, session_id)
