@@ -377,60 +377,46 @@ def _load_pending_jobs():
 # initialize
 _init_db()
 _load_pending_jobs()
-# ------------------------------------------------------------------
-# 🔧 Thin wrapper-class binding the standalone functions above
-#     back into the OO interface expected elsewhere in the codebase.
-# ------------------------------------------------------------------
 
+# ─────────── monkey‑patch: restore missing class + global wrappers ────────────
 class ManusClient:
-    """Restored OO wrapper around the functional implementation above.
-
-    Keeping the heavy lifting as‑is, we just delegate each public / helper
-    call to its original top‑level function so existing imports like
-
-        from manus_client import ManusClient
-
-    keep working without refactoring 6000+ lines.
+    """Thin shell so external code can still do `ManusClient().ask_manus(...)`
+    even though the original refactor flattened the methods.
     """
 
-    # ------- public (batch) -------
+    # batch
     def ask_manus(self, prompt: str):
         return ask_manus(self, prompt)
 
-    # ------- public (stream) ------
+    # streaming
     async def stream_manus(self, prompt: str):
-        async for chunk in stream_manus(self, prompt):
+        async for chunk in _stream_manus_impl(self, prompt):
             yield chunk
 
-    # ------- scheduling ----------
+    # natural‑language scheduler helper
     def ask_or_schedule(self, nl_command: str, session_id: str | None = None):
         return ask_or_schedule(self, nl_command, session_id)
 
-    # ------- helper delegates ----
-    def _extract_schedule(self, nl_text: str):
-        return _extract_schedule(nl_text)
+    # expose static run helper for APScheduler
+    _run_manus_job_static = staticmethod(_run_manus_job_static)
 
-    def _schedule_job(self, prompt: str, fire_at, session_id: str):
-        return _schedule_job(self, prompt, fire_at, session_id)
 
-    async def _interact_with_manus(self, prompt: str, log):
-        return await _interact_with_manus(self, prompt, log)
+# keep the old top‑level API for code that imports it directly
+async def _stream_manus_impl(dummy_self, prompt: str):
+    """Internal implementation that matches the signature of the old method."""
+    async for chunk in _stream_interact_with_manus(dummy_self, prompt):
+        yield chunk
 
-    async def _stream_interact_with_manus(self, prompt: str):
-        async for chunk in _stream_interact_with_manus(self, prompt):
-            yield chunk
 
-    # ------- text utils ----------
-    def _has_error(self, text: str):
-        return _has_error(text)
+async def stream_manus(prompt: str):
+    """Module‑level convenience wrapper so `from manus_client import stream_manus`
+    keeps working. Returns the same async generator the class method yields.
+    """
+    cli = ManusClient()
+    async for chunk in cli.stream_manus(prompt):
+        yield chunk
 
-    def _has_end(self, text: str):
-        return _has_end(text)
 
-    def _strip_end_token(self, text: str):
-        return _strip_end_token(text)
-
-    # ------- static job runner ---
-    @staticmethod
-    async def _run_manus_job_static(prompt: str, job_id: int, session_id: str):
-        await _run_manus_job_static(prompt, job_id, session_id)
+def ask_manus_batch(prompt: str):
+    """Alias for backward compatibility."""
+    return ManusClient().ask_manus(prompt)
