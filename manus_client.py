@@ -167,7 +167,8 @@ class ManusClient:
        await page.goto("https://accounts.google.com/signin/v2/identifier?service=mail")
        await page.fill('input[type="email"]', MANUS_EMAIL)
        await page.click('button:has-text("Next")')
-       await page.wait_for_selector('input[type="password"]', timeout=10000)
+       await page.wait_for_selector('input[type="password"]', state="attached", timeout=30000)
+       await page.wait_for_selector('input[type="password"]', state="visible", timeout=30000)
        await page.fill('input[type="password"]', MANUS_PASSWORD)
        await page.click('button:has-text("Next")')
        await page.wait_for_timeout(5000)
@@ -184,7 +185,8 @@ class ManusClient:
        await page.goto("https://accounts.google.com/signin/v2/identifier?service=mail")
        await page.fill('input[type="email"]', MANUS_EMAIL)
        await page.click('button:has-text("Next")')
-       await page.wait_for_selector('input[type="password"]', timeout=10000)
+       await page.wait_for_selector('input[type="password"]', state="attached", timeout=30000)
+       await page.wait_for_selector('input[type="password"]', state="visible", timeout=30000)
        await page.fill('input[type="password"]', MANUS_PASSWORD)
        await page.click('button:has-text("Next")')
        await page.wait_for_timeout(5000)
@@ -318,7 +320,10 @@ async def _send_prompt_stream(self, page, prompt):
                last_text = curr_text
        return last_text
 
+   @staticmethod
+   def _has_end(text: str) -> bool:
        return bool(re.search(r"(^|\s)END(\s|[.!?]|$)", text))
+
 
 
    @staticmethod
