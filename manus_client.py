@@ -239,13 +239,21 @@ class ManusClient:
            await page.wait_for_timeout(POLL_INTERVAL_MS)
            for block in await page.query_selector_all("div[data-message-id], div.prose"):
                try:
-                   text = (await block.inner_text()).strip()
+                   curr_raw = await self._wait_for_stable_text(block)
+                   text = curr_raw.strip()
                    if text and text not in seen:
                        seen.add(text)
                        log(f"💬 {text[:80]}")
                        if self._has_error(text):
                            return "[❌] Manus signaled ERROR."
                        if self._has_end(text):
+                           if len(text) < 50 or not text.endswith((".", "!", "?")):
+                               log("⚠️ END appeared but answer looks incomplete… double-checking.")
+                               await page.wait_for_timeout(2000)
+                               updated = (await block.inner_text()).strip()
+                               if len(updated) > len(text):
+                                   log("🧠 updated content is longer — using that.")
+                                   text = updated
                            return self._strip_end_token(text)
                except Exception:
                    continue
@@ -266,7 +274,8 @@ class ManusClient:
            await page.wait_for_timeout(POLL_INTERVAL_MS)
            for block in await page.query_selector_all("div[data-message-id], div.prose"):
                try:
-                   text = (await block.inner_text()).strip()
+                   curr_raw = await self._wait_for_stable_text(block)
+                   text = curr_raw.strip()
                    if text and text not in seen:
                        seen.add(text)
                        yield {"type": "log", "message": f"💬 {text[:80]}"}
@@ -281,8 +290,27 @@ class ManusClient:
        yield {"type": "answer", "message": "[❌] Manus response timed out without END or ERROR."}
 
 
-   # -------- token utils ----------
-   @staticmethod
+   
+   async def _wait_for_stable_text(self, block, timeout=3000, poll_interval=300):
+       """Wait until the text inside *block* stops changing for two consecutive
+       polls (default 300 ms) or until *timeout* ms is reached. Return the final
+       stable text (may be empty)."""
+       last_text = await block.inner_text()
+       stable_count = 0
+       elapsed = 0
+       while elapsed < timeout:
+           await asyncio.sleep(poll_interval / 1000)
+           elapsed += poll_interval
+           curr_text = await block.inner_text()
+           if curr_text == last_text:
+               stable_count += 1
+               if stable_count >= 2:  # unchanged for two polls ⇒ stable
+                   return curr_text
+           else:
+               stable_count = 0
+               last_text = curr_text
+       return last_text
+
    def _has_end(text: str) -> bool:
        return bool(re.search(r"(^|\s)END(\s|[.!?]|$)", text))
 
@@ -295,4 +323,3 @@ class ManusClient:
    @staticmethod
    def _strip_end_token(text: str) -> str:
        return re.sub(r"(^|\s)END(\s|[.!?]|$)", "", text).rstrip()
-
