@@ -48,32 +48,6 @@ class ManusClient:
 
 
    # ------------- public (batch) -------------
-   # ── helper: robust element utils ────────────────────────────
-   async def _fill_first_visible(self, page, selectors, text) -> bool:
-       """Try filling each selector until one is visible. Returns True if filled."""
-       for sel in selectors:
-           try:
-               loc = page.locator(sel)
-               await loc.wait_for(state="visible", timeout=2500)
-               await loc.fill(text)
-               return True
-           except Exception:
-               continue
-       return False
-
-   async def _click_first(self, page, selectors) -> None:
-       """Click the first visible matching selector."""
-       for sel in selectors:
-           try:
-               loc = page.locator(sel)
-               await loc.wait_for(state="visible", timeout=2500)
-               await loc.click()
-               return
-           except Exception:
-               continue
-       raise RuntimeError(f"Could not click any of: {selectors}")
-
-
    def ask_manus(self, prompt: str) -> Dict[str, list]:
        logs: list[str] = []
 
@@ -174,94 +148,47 @@ class ManusClient:
 
 
    # ------------- helpers -------------
-
    async def _google_login(self, page, context, log):
-       log("🔐 performing one‑time Google login…")
+       log("🔐 performing one-time Google login…")
        await page.goto("https://accounts.google.com/signin/v2/identifier?service=mail")
+       await page.fill('input[type="email"]', MANUS_EMAIL)
+       await page.click('button:has-text("Next")')
+       await page.wait_for_selector('input[type="password"], input[name="Passwd"], input[autocomplete="current-password"]', timeout=15000)
+       await page.fill('input[name="Passwd"]', MANUS_PASSWORD) if await page.locator('input[name="Passwd"]').is_visible(timeout=1000) else await page.fill('input[type="password"]', MANUS_PASSWORD)
+       await page.click('button:has-text("Next")')
+       await page.wait_for_timeout(5000)
 
-       email_selectors = [
-           'input[type="email"]',
-           'input[name="identifier"]',
-           'input[autocomplete="username"]',
-           'input[type="text"][name="identifier"]'
-       ]
-       if not await self._fill_first_visible(page, email_selectors, MANUS_EMAIL):
-           raise RuntimeError("Email input not found 🌩️")
 
-       await self._click_first(page, ['button:has-text("Next")', 'button:has-text("next")'])
-
-       password_selectors = [
-           'input[type="password"]',
-           'input[name="Passwd"]',
-           'input[autocomplete="current-password"]'
-       ]
-       await page.wait_for_timeout(1000)
-       if not await self._fill_first_visible(page, password_selectors, MANUS_PASSWORD):
-           raise RuntimeError("Password input not found 🌩️")
-
-       await self._click_first(page, ['button:has-text("Next")', 'button:has-text("Sign in")'])
-
-       # optional phone verification
-       try:
-           await page.locator('input[type="tel"]').wait_for(state="visible", timeout=5000)
+       if await page.locator('input[type="tel"]').is_visible(timeout=5000):
            await page.fill('input[type="tel"]', VERIFICATION_PHONE)
            await page.keyboard.press("Enter")
-       except Exception:
-           pass
+           await page.wait_for_timeout(5000)
 
-       await page.wait_for_timeout(3000)
 
-       # save cookies/state for future sessions
-       state = await context.storage_state()
-       with open("state.json", "w", encoding="utf-8") as f:
-           json.dump(state, f)
-           log("💾 cookies saved to state.json (good for 3‑6 months).")
+       await context.storage_state(path="state.json")
+       log("🔒 google auth completed & cookies saved.")
+
 
    async def _google_login_stream(self, page, context) -> AsyncGenerator[Dict[str, str], None]:
-       yield {"type": "log", "message": "🔐 performing one‑time Google login…"}
+       yield {"type": "log", "message": "🔐 performing one-time Google login…"}
        await page.goto("https://accounts.google.com/signin/v2/identifier?service=mail")
+       await page.fill('input[type="email"]', MANUS_EMAIL)
+       await page.click('button:has-text("Next")')
+       await page.wait_for_selector('input[type="password"], input[name="Passwd"], input[autocomplete="current-password"]', timeout=15000)
+       await page.fill('input[name="Passwd"]', MANUS_PASSWORD) if await page.locator('input[name="Passwd"]').is_visible(timeout=1000) else await page.fill('input[type="password"]', MANUS_PASSWORD)
+       await page.click('button:has-text("Next")')
+       await page.wait_for_timeout(5000)
 
-       email_selectors = [
-           'input[type="email"]',
-           'input[name="identifier"]',
-           'input[autocomplete="username"]',
-           'input[type="text"][name="identifier"]'
-       ]
-       if not await self._fill_first_visible(page, email_selectors, MANUS_EMAIL):
-           yield {"type": "error", "message": "[❌] Email input not found"}
-           return
-       yield {"type": "log", "message": "📧 entered email"}
 
-       await self._click_first(page, ['button:has-text("Next")', 'button:has-text("next")'])
-
-       password_selectors = [
-           'input[type="password"]',
-           'input[name="Passwd"]',
-           'input[autocomplete="current-password"]'
-       ]
-       await page.wait_for_timeout(1000)
-       if not await self._fill_first_visible(page, password_selectors, MANUS_PASSWORD):
-           yield {"type": "error", "message": "[❌] Password input not found"}
-           return
-       yield {"type": "log", "message": "🔒 entered password"}
-
-       await self._click_first(page, ['button:has-text("Next")', 'button:has-text("Sign in")'])
-
-       # phone verification
-       try:
-           await page.locator('input[type="tel"]').wait_for(state="visible", timeout=5000)
+       if await page.locator('input[type="tel"]').is_visible(timeout=5000):
            await page.fill('input[type="tel"]', VERIFICATION_PHONE)
            await page.keyboard.press("Enter")
-           yield {"type": "log", "message": "📱 phone verification entered"}
-       except Exception:
-           pass
+           await page.wait_for_timeout(5000)
 
-       await page.wait_for_timeout(3000)
 
-       state = await context.storage_state()
-       with open("state.json", "w", encoding="utf-8") as f:
-           json.dump(state, f)
-           yield {"type": "log", "message": "💾 cookies saved to state.json"}
+       await context.storage_state(path="state.json")
+       yield {"type": "log", "message": "🔒 google auth completed & cookies saved."}
+
 
    async def _manus_login(self, page, log):
        log("📄 navigating to Manus login…")
@@ -277,7 +204,6 @@ class ManusClient:
            log(f"⚠️ manus login issue: {e}")
 
 
-
    async def _manus_login_stream(self, page) -> AsyncGenerator[Dict[str, str], None]:
        yield {"type": "log", "message": "📄 navigating to Manus login…"}
        await page.goto("https://manus.im/login")
@@ -290,8 +216,6 @@ class ManusClient:
                yield {"type": "log", "message": "✅ Manus dashboard loaded."}
        except Exception as e:
            yield {"type": "log", "message": f"⚠️ manus login issue: {e}"}
-
-
 
 
    async def _send_prompt(self, page, prompt, log) -> str:
