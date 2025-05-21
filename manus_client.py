@@ -197,7 +197,7 @@ class ManusClient:
 
 
    async def _manus_login(self, page, log):
-       log("📄 navigating to Manus login…")
+       log("📄 navigating to Agent login…")
        await page.goto("https://manus.im/login")
        try:
            btn = page.locator("text=Sign up with Google")
@@ -211,7 +211,7 @@ class ManusClient:
 
 
    async def _manus_login_stream(self, page):
-       yield {"type": "log", "message": "📄 navigating to Manus login…"}
+       yield {"type": "log", "message": "📄 navigating to Agent login…"}
        await page.goto("https://manus.im/login")
        try:
            btn = page.locator("text=Sign up with Google")
@@ -221,73 +221,80 @@ class ManusClient:
                await page.wait_for_timeout(3000)
                yield {"type": "log", "message": "✅ Manus dashboard loaded."}
        except Exception as e:
-           yield {"type": "log", "message": f"⚠️ manus login issue: {e}"}
+           yield {"type": "log", "message": f"⚠️ agent login issue: {e}"}
 
 
    # -------- prompt helpers --------
-   async def _send_prompt(self, page, prompt, log) -> str:
-       log(f"🧠 sending prompt → {prompt[:60]}…")
-       await page.fill("textarea", prompt)
-       await page.keyboard.press("Enter")
+
+   
+async def _send_prompt(self, page, prompt, log) -> str:
+   """Send *prompt* to Manus and return the final, END‑terminated answer."""
+   log(f"🧠 sending prompt → {prompt[:60]}…")
+   await page.fill("textarea", prompt)
+   await page.keyboard.press("Enter")
+
+   log("📡 Lance O' Lot is working… (waiting for END/ERROR token) 🐴")
+   seen: Set[str] = set()
+   parts: List[str] = []
+
+   for _ in range(TIMEOUT_LOOPS):
+      await page.wait_for_timeout(POLL_INTERVAL_MS)
+      for block in await page.query_selector_all("div[data-message-id], div.prose"):
+         try:
+            raw = await self._wait_for_stable_text(block)
+            txt = raw.strip()
+            if not txt or txt in seen:
+               continue
+            seen.add(txt)
+            parts.append(txt)
+            log(f"💬 {txt[:80]}")
+            if self._has_error(txt):
+               return "[❌] Manus signaled ERROR."
+            if self._has_end(txt):
+               return self._strip_end_token("\n\n".join(parts))
+         except Exception:
+            continue
+   return "[❌] Manus response timed out without END or ERROR."
+
+async def _send_prompt_stream(self, page, prompt):
+   """Stream Manus output for real‑time UI updates."""
+   yield {"type": "log", "message": f"🧠 sending prompt → {prompt[:60]}…"}
+   await page.fill("textarea", prompt)
+   await page.keyboard.press("Enter")
+
+   yield {"type": "log", "message": "📡 Lance O' Lot is working… (streaming) 🐴"}
+   seen: Set[str] = set()
+   parts: List[str] = []
+
+   for _ in range(TIMEOUT_LOOPS):
+      await page.wait_for_timeout(POLL_INTERVAL_MS)
+      new_piece = False
+      for block in await page.query_selector_all("div[data-message-id], div.prose"):
+         try:
+            raw = await self._wait_for_stable_text(block)
+            txt = raw.strip()
+            if not txt or txt in seen:
+               continue
+            seen.add(txt)
+            parts.append(txt)
+            new_piece = True
+            yield {"type": "log", "message": f"💬 {txt[:80]}"}
+         except Exception:
+            continue
+
+      if new_piece:
+         yield {"type": "answer", "message": "\n\n".join(parts)}
+
+      if parts and self._has_error(parts[-1]):
+         yield {"type": "answer", "message": "[❌] Manus signaled ERROR."}
+         return
+      if parts and self._has_end(parts[-1]):
+         yield {"type": "answer", "message": self._strip_end_token('\n\n'.join(parts))}
+         return
+
+   yield {"type": "answer", "message": "[❌] Manus response timed out without END or ERROR."}
 
 
-       log("📡 Lance O' Lot is working… (waiting for END/ERROR token) 🐴")
-       seen: Set[str] = set()
-
-
-       for _ in range(TIMEOUT_LOOPS):
-           await page.wait_for_timeout(POLL_INTERVAL_MS)
-           for block in await page.query_selector_all("div[data-message-id], div.prose"):
-               try:
-                   curr_raw = await self._wait_for_stable_text(block)
-                   text = curr_raw.strip()
-                   if text and text not in seen:
-                       seen.add(text)
-                       log(f"💬 {text[:80]}")
-                       if self._has_error(text):
-                           return "[❌] Manus signaled ERROR."
-                       if self._has_end(text):
-                           if len(text) < 50 or not text.endswith((".", "!", "?")):
-                               log("⚠️ END appeared but answer looks incomplete… double-checking.")
-                               await page.wait_for_timeout(2000)
-                               updated = (await block.inner_text()).strip()
-                               if len(updated) > len(text):
-                                   log("🧠 updated content is longer — using that.")
-                                   text = updated
-                           return self._strip_end_token(text)
-               except Exception:
-                   continue
-       return "[❌] Manus response timed out without END or ERROR."
-
-
-   async def _send_prompt_stream(self, page, prompt):
-       yield {"type": "log", "message": f"🧠 sending prompt → {prompt[:60]}…"}
-       await page.fill("textarea", prompt)
-       await page.keyboard.press("Enter")
-
-
-       yield {"type": "log", "message": "📡 Lance O' Lot is working… (waiting for END/ERROR token) 🐴"}
-       seen: Set[str] = set()
-
-
-       for _ in range(TIMEOUT_LOOPS):
-           await page.wait_for_timeout(POLL_INTERVAL_MS)
-           for block in await page.query_selector_all("div[data-message-id], div.prose"):
-               try:
-                   curr_raw = await self._wait_for_stable_text(block)
-                   text = curr_raw.strip()
-                   if text and text not in seen:
-                       seen.add(text)
-                       yield {"type": "log", "message": f"💬 {text[:80]}"}
-                       if self._has_error(text):
-                           yield {"type": "answer", "message": "[❌] Manus signaled ERROR."}
-                           return
-                       if self._has_end(text):
-                           yield {"type": "answer", "message": self._strip_end_token(text)}
-                           return
-               except Exception:
-                   continue
-       yield {"type": "answer", "message": "[❌] Manus response timed out without END or ERROR."}
 
 
    
@@ -311,7 +318,6 @@ class ManusClient:
                last_text = curr_text
        return last_text
 
-   def _has_end(text: str) -> bool:
        return bool(re.search(r"(^|\s)END(\s|[.!?]|$)", text))
 
 
