@@ -28,6 +28,13 @@ if not BB_API_KEY or not BB_PROJECT_ID:
 
 bb = Browserbase(api_key=BB_API_KEY)
 
+SYSTEM_CONTEXT = (
+    "You are Manus AI, answering questions **mostly about Pasadena City College**. "
+    "Unless the prompt is clearly unrelated, assume it’s PCC-specific and answer directly. "
+    "Do **NOT** ask the user follow-up questions or request clarification. "
+)
+
+
 
 
 
@@ -70,7 +77,7 @@ class ManusClient:
 
    # ------------- internal (batch path) ------------
    async def _interact_with_manus(self, prompt: str, log) -> str:
-       prompt += " (say END when you're done writing your final answer)"
+       prompt = SYSTEM_CONTEXT + prompt + " (say END when you're done writing your final answer)"
        log("🚀 spinning up remote chromium session on Browserbase…")
 
 
@@ -108,7 +115,7 @@ class ManusClient:
 
    # ------------- internal (stream path) ------------
    async def _stream_interact_with_manus(self, prompt: str) -> AsyncGenerator[Dict[str, str], None]:
-       prompt += " (say END when you're done writing your final answer)"
+       prompt = SYSTEM_CONTEXT + prompt + " (say END when you're done writing your final answer)"
        yield {"type": "log", "message": "🚀 spinning up remote chromium session on Browserbase…"}
 
 
