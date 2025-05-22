@@ -164,4 +164,7 @@ async def stream_manus(self, prompt: str) -> AsyncGenerator[Dict[str, str], None
         yield {"type": "answer", "message": "[❌] Manus response timed out."}
 
 # -- legacy alias for older calls -----------------------------
-setattr(ManusClient, "stream_manus", ManusClient.stream_manus_frames)
+
+# -- legacy alias for older code -----------------------------------------
+if not hasattr(ManusClient, "stream_manus"):
+    setattr(ManusClient, "stream_manus", ManusClient.stream_manus_frames)
