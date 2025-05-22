@@ -41,6 +41,13 @@ class ManusClient:
 
     NOTE: the old END‑token logic is removed.
     """
+    # --- backward‑compat alias (old code expects stream_manus) ---
+    async def stream_manus(self, prompt: str):
+        """Alias for stream_manus_frames for legacy callers."""
+        async for chunk in self.stream_manus_frames(prompt):
+            yield chunk
+
+
 # --- backward‑compat alias (old code expects stream_manus) ---
 async def stream_manus(self, prompt: str):
     """Alias for stream_manus_frames for legacy callers."""
