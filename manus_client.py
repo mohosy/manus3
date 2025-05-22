@@ -24,8 +24,9 @@ if not BB_API_KEY or not BB_PROJECT_ID:
 
 bb = Browserbase(api_key=BB_API_KEY)
 
+INSTRUCTION = "You are a Pasadena City College counselor. When answering prompts do not ask questions back."
 # ── timing ─────────────────────────────────────────────────────
-POLL_INTERVAL_MS = 2000          # 2‑second initial poll
+POLL_INTERVAL_MS = 10000          # 2‑second initial poll
 TIMEOUT_LOOPS    = 150           # ~5 minutes max
 
 # ── main public class ──────────────────────────────────────────
@@ -41,12 +42,12 @@ class ManusClient:
 
     NOTE: the old END‑token logic is removed.
     """
+# --- backward‑compat alias (old code expects stream_manus) ---
+async def stream_manus(self, prompt: str):
+    """Alias for stream_manus_frames for legacy callers."""
+    async for chunk in self.stream_manus_frames(prompt):
+        yield chunk
 
-    # --- backward‑compat alias (old code expects stream_manus) ---
-    async def stream_manus(self, prompt: str):
-        """Alias for stream_manus_frames for legacy callers."""
-        async for chunk in self.stream_manus_frames(prompt):
-            yield chunk
 
     # ------------- public (stream) -------------
     async def stream_manus_frames(self, prompt: str) -> AsyncGenerator[Dict[str, str], None]:
@@ -122,7 +123,7 @@ class ManusClient:
     # ------------- helpers – prompt & screenshots -------------
     async def _send_prompt_stream(self, page, prompt: str) -> AsyncGenerator[Dict[str, str], None]:
         yield {"type": "log", "message": f"🧠 sending prompt → {prompt[:60]}…"}
-        await page.fill("textarea", prompt)
+        await page.fill("textarea", prompt + "\n\n" + INSTRUCTION)
         await page.keyboard.press("Enter")
 
         yield {"type": "log", "message": "📡 streaming full‑page screenshots …"}
@@ -140,9 +141,5 @@ class ManusClient:
             if h != seen_hash:
                 seen_hash = h
                 yield {"type": "frame", "b64": b64}
-
-            # exponential back‑off every 60 secs (30 loops)
-            if (_ + 1) % 30 == 0 and poll_ms < 8000:
-                poll_ms += 2000
 
         yield {"type": "log", "message": "⌛ timeout reached without external FINAL verdict."}
