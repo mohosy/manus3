@@ -1,117 +1,276 @@
 
-import asyncio, os, json, base64, hashlib
-from typing import AsyncGenerator, Dict, Optional, List
+
+
+
+
+
+import asyncio
+import os
+import json
+from typing import AsyncGenerator, Dict
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright
 from browserbase import Browserbase
 
+
 load_dotenv()
 
+
 # ── credentials / config ───────────────────────────────────────
-MANUS_EMAIL        = os.getenv("MANUS_EMAIL") or "pccagent18@gmail.com"
-MANUS_PASSWORD     = os.getenv("MANUS_PASSWORD") or "thisisforpcc"
-BB_API_KEY         = os.getenv("BROWSERBASE_API_KEY")
-BB_PROJECT_ID      = os.getenv("BROWSERBASE_PROJECT_ID")
+MANUS_EMAIL        = "pccagent18@gmail.com"
+MANUS_PASSWORD     = "thisisforpcc"
+VERIFICATION_PHONE = "6263606593"
+
+
+BB_API_KEY    = os.getenv("BROWSERBASE_API_KEY")
+BB_PROJECT_ID = os.getenv("BROWSERBASE_PROJECT_ID")
+
 
 if not BB_API_KEY or not BB_PROJECT_ID:
-    raise EnvironmentError("Missing BROWSERBASE_API_KEY or BROWSERBASE_PROJECT_ID")
+   raise EnvironmentError("Missing BROWSERBASE_API_KEY or BROWSERBASE_PROJECT_ID")
 
-# ── constants ──────────────────────────────────────────────────
-INSTRUCTION = (
-    "You are a Pasadena City College counselor. "
-    "Answer the prompt below directly. Do NOT ask follow‑up questions. "
-    "Here is the prompt:"
-)
-
-POLL_INTERVAL_MS = int(os.getenv("POLL_INTERVAL_MS", "5000"))   # 5‑second cadence
-TIMEOUT_LOOPS    = int(os.getenv("TIMEOUT_LOOPS", "150"))       # ~12½ min max
 
 bb = Browserbase(api_key=BB_API_KEY)
 
+
+
+
 # ── main public class ──────────────────────────────────────────
 class ManusClient:
-    """Cloud‑browser wrapper around Manus.AI.
-    Streams screenshots every POLL_INTERVAL_MS.
-    If *use_vision=True* you rely on the caller (e.g. GPT‑4o Vision) to decide when
-    the answer is ready. Otherwise we also sniff the DOM for an END token or
-    any non-empty `div.prose` and return the text ourselves.
-    """
+   """
+   Cloud‑browser wrapper around Manus.AI.
 
-    # --------- user-facing entry ---------
-    async def stream_manus_frames(
-        self,
-        prompt: str,
-        *,
-        use_vision: bool = True
-    ) -> AsyncGenerator[Dict[str, str], None]:
-        """High-level wrapper that hides the auth flow."""
-        async for chunk in self._stream_interact_with_manus(prompt, use_vision):
-            yield chunk
 
-    # -- legacy alias --------------------------------------------------
-    async def stream_manus(self, prompt: str) -> AsyncGenerator[Dict[str, str], None]:
-        async for c in self.stream_manus_frames(prompt):
-            yield c
+   • ask_manus(prompt)        -> {"logs": [...], "answer": "..."}
+     (returns everything at once, back‑compat.)
 
-    # --------- internal helpers ---------
-    async def _stream_interact_with_manus(
-        self,
-        prompt: str,
-        use_vision: bool
-    ) -> AsyncGenerator[Dict[str, str], None]:
-        yield {"type": "log", "message": "🚀 spinning up remote chromium session…"}
-        session = bb.start_session(project_id=BB_PROJECT_ID, headless=True)
-        yield {"type": "log", "message": f"🔗 live view: https://browserbase.com/sessions/{session.id}"}
 
-        async with async_playwright() as p:
-            browser = await p.chromium.connect_over_cdp(session.connect_url)
-            context = browser.contexts[0]
-            page    = context.pages[0]
+   • stream_manus(prompt) -> async generator yielding:
+       {"type": "log",    "message": "..."}      # for each thinking blurb
+       {"type": "answer", "message": "final"}    # final answer, END removed
+   """
 
-            # 1) login
-            await page.goto("https://manus.im/")
-            await page.wait_for_selector('text=Sign in with Google')
-            await page.click('text=Sign in with Google')
-            await page.fill('input[type="email"]', MANUS_EMAIL)
-            await page.click('button:has-text("Next")')
-            await page.fill('input[type="password"]', MANUS_PASSWORD)
-            await page.click('button:has-text("Next")')
-            await page.wait_for_selector('textarea', timeout=60000)
 
-            # 2) send prompt with instruction
-            full_prompt = f"{INSTRUCTION}\n\n{prompt}"
-            yield {"type": "log", "message": f"🧠 prompt → {prompt[:60]}…"}
-            await page.fill("textarea", full_prompt)
-            await page.keyboard.press("Enter")
-            yield {"type": "log", "message": "📸 streaming screenshots …"}
+   # ------------- public (batch) -------------
+   def ask_manus(self, prompt: str) -> Dict[str, list]:
+       logs: list[str] = []
 
-            # 3) read loop
-            seen_hash: Optional[str] = None
-            for _ in range(TIMEOUT_LOOPS):
-                await page.wait_for_timeout(POLL_INTERVAL_MS)
 
-                # a) optional DOM sniff (if not using vision)
-                if not use_vision:
-                    try:
-                        prose = await page.query_selector("div.prose")
-                        if prose:
-                            txt = (await prose.inner_text()).strip()
-                            if txt:
-                                yield {"type": "answer", "message": txt}
-                                break
-                    except Exception:
-                        pass
+       # helper that prints AND stores
+       def log(line: str):
+           print(line)
+           logs.append(line)
 
-                # b) screenshot stream
-                png = await page.screenshot(full_page=True, type="png")
-                b64 = base64.b64encode(png).decode()
-                h   = hashlib.md5(b64.encode()).hexdigest()
-                if h != seen_hash:
-                    seen_hash = h
-                    yield {"type": "frame", "b64": b64}
 
-            else:
-                yield {"type": "answer", "message": "[❌] Manus timed out."}
+       answer = asyncio.run(self._interact_with_manus(prompt, log))
+       return {"logs": logs, "answer": answer}
 
-            await browser.close()
-            session.close()
+
+   # ------------- public (stream) -------------
+   async def stream_manus(self, prompt: str) -> AsyncGenerator[Dict[str, str], None]:
+       async for chunk in self._stream_interact_with_manus(prompt):
+           yield chunk
+
+
+   # ------------- internal (batch path) ------------
+   async def _interact_with_manus(self, prompt: str, log) -> str:
+       prompt += " (say END when you're done writing your final answer)"
+       log("🚀 spinning up remote chromium session on Browserbase…")
+
+
+       session = bb.sessions.create(project_id=BB_PROJECT_ID)
+       log(f"🔗 connected. live view: https://browserbase.com/sessions/{session.id}")
+
+
+       async with async_playwright() as p:
+           browser = await p.chromium.connect_over_cdp(session.connect_url)
+           context = browser.contexts[0] if browser.contexts else await browser.new_context()
+           page    = context.pages[0]   if context.pages   else await context.new_page()
+
+
+           # ── login flow ──
+           if not os.path.exists("state.json"):
+               await self._google_login(page, context, log)
+           else:
+               with open("state.json", "r", encoding="utf-8") as f:
+                   cookies = json.load(f).get("cookies", [])
+                   if cookies:
+                       await context.add_cookies(cookies)
+
+
+           await self._manus_login(page, log)
+
+
+           # ── prompt / answer ──
+           answer = await self._send_prompt(page, prompt, log)
+
+
+           await browser.close()
+           log("✅ remote browser closed.")
+           return answer
+
+
+   # ------------- internal (stream path) ------------
+   async def _stream_interact_with_manus(self, prompt: str) -> AsyncGenerator[Dict[str, str], None]:
+       prompt += " (say END when you're done writing your final answer)"
+       yield {"type": "log", "message": "🚀 spinning up remote chromium session on Browserbase…"}
+
+
+       session = bb.sessions.create(project_id=BB_PROJECT_ID)
+       yield {"type": "log", "message": f"🔗 connected. live view: https://browserbase.com/sessions/{session.id}"}
+
+
+       async with async_playwright() as p:
+           browser = await p.chromium.connect_over_cdp(session.connect_url)
+           context = browser.contexts[0] if browser.contexts else await browser.new_context()
+           page    = context.pages[0]   if context.pages   else await context.new_page()
+
+
+           # ── login flow ──
+           if not os.path.exists("state.json"):
+               async for l in self._google_login_stream(page, context):
+                   yield l
+           else:
+               with open("state.json", "r", encoding="utf-8") as f:
+                   cookies = json.load(f).get("cookies", [])
+                   if cookies:
+                       await context.add_cookies(cookies)
+                       yield {"type": "log", "message": "🔓 cookies loaded from state.json."}
+
+
+           async for l in self._manus_login_stream(page):
+               yield l
+
+
+           # ── prompt / answer ──
+           async for chunk in self._send_prompt_stream(page, prompt):
+               yield chunk
+
+
+           await browser.close()
+           yield {"type": "log", "message": "✅ remote browser closed."}
+
+
+   # ------------- helpers -------------
+   async def _google_login(self, page, context, log):
+       log("🔐 performing one-time Google login…")
+       await page.goto("https://accounts.google.com/signin/v2/identifier?service=mail")
+       await page.fill('input[type="email"]', MANUS_EMAIL)
+       await page.click('button:has-text("Next")')
+       await page.wait_for_selector('input[type="password"]', timeout=10000)
+       await page.fill('input[type="password"]', MANUS_PASSWORD)
+       await page.click('button:has-text("Next")')
+       await page.wait_for_timeout(5000)
+
+
+       if await page.locator('input[type="tel"]').is_visible(timeout=5000):
+           await page.fill('input[type="tel"]', VERIFICATION_PHONE)
+           await page.keyboard.press("Enter")
+           await page.wait_for_timeout(5000)
+
+
+       await context.storage_state(path="state.json")
+       log("🔒 google auth completed & cookies saved.")
+
+
+   async def _google_login_stream(self, page, context) -> AsyncGenerator[Dict[str, str], None]:
+       yield {"type": "log", "message": "🔐 performing one-time Google login…"}
+       await page.goto("https://accounts.google.com/signin/v2/identifier?service=mail")
+       await page.fill('input[type="email"]', MANUS_EMAIL)
+       await page.click('button:has-text("Next")')
+       await page.wait_for_selector('input[type="password"]', timeout=10000)
+       await page.fill('input[type="password"]', MANUS_PASSWORD)
+       await page.click('button:has-text("Next")')
+       await page.wait_for_timeout(5000)
+
+
+       if await page.locator('input[type="tel"]').is_visible(timeout=5000):
+           await page.fill('input[type="tel"]', VERIFICATION_PHONE)
+           await page.keyboard.press("Enter")
+           await page.wait_for_timeout(5000)
+
+
+       await context.storage_state(path="state.json")
+       yield {"type": "log", "message": "🔒 google auth completed & cookies saved."}
+
+
+   async def _manus_login(self, page, log):
+       log("📄 navigating to Manus login…")
+       await page.goto("https://manus.im/login")
+       try:
+           btn = page.locator("text=Sign up with Google")
+           if await btn.is_visible(timeout=5000):
+               await btn.click()
+               await page.wait_for_url("**/app", timeout=15000)
+               await page.wait_for_timeout(3000)
+               log("✅ Manus dashboard loaded.")
+       except Exception as e:
+           log(f"⚠️ manus login issue: {e}")
+
+
+   async def _manus_login_stream(self, page) -> AsyncGenerator[Dict[str, str], None]:
+       yield {"type": "log", "message": "📄 navigating to Manus login…"}
+       await page.goto("https://manus.im/login")
+       try:
+           btn = page.locator("text=Sign up with Google")
+           if await btn.is_visible(timeout=5000):
+               await btn.click()
+               await page.wait_for_url("**/app", timeout=15000)
+               await page.wait_for_timeout(3000)
+               yield {"type": "log", "message": "✅ Manus dashboard loaded."}
+       except Exception as e:
+           yield {"type": "log", "message": f"⚠️ manus login issue: {e}"}
+
+
+   async def _send_prompt(self, page, prompt, log) -> str:
+       log(f"🧠 sending prompt → {prompt[:60]}…")
+       await page.fill("textarea", prompt)
+       await page.keyboard.press("Enter")
+
+
+       log("📡 waiting for END token…")
+       seen = set()
+       for _ in range(60):                # 2‑minute timeout
+           await page.wait_for_timeout(2000)
+           for block in await page.query_selector_all("div[data-message-id], div.prose"):
+               try:
+                   text = await block.inner_text()
+                   if text not in seen:
+                       seen.add(text)
+                       log(f"💬 {text.strip()}")
+                       if "END" in text:
+                           return text.strip()
+               except Exception:
+                   continue
+       return "[❌] Manus response did not include END in time."
+
+
+   async def _send_prompt_stream(self, page, prompt) -> AsyncGenerator[Dict[str, str], None]:
+       yield {"type": "log", "message": f"🧠 sending prompt → {prompt[:60]}…"}
+       await page.fill("textarea", prompt)
+       await page.keyboard.press("Enter")
+
+
+       yield {"type": "log", "message": "📡 waiting for END token…"}
+       seen = set()
+       async def new_texts():
+           for block in await page.query_selector_all("div[data-message-id], div.prose"):
+               try:
+                   text = await block.inner_text()
+                   if text not in seen:
+                       seen.add(text)
+                       yield text.strip()
+               except Exception:
+                   continue
+
+
+       for _ in range(60):                # 2‑minute timeout
+           await page.wait_for_timeout(2000)
+           async for txt in new_texts():
+               yield {"type": "log", "message": f"💬 {txt}"}
+               if "END" in txt:
+                   clean = txt.replace("END", "").strip()
+                   yield {"type": "answer", "message": clean}
+                   return
+       yield {"type": "answer", "message": "[❌] Manus response did not include END in time."}
+
