@@ -48,7 +48,7 @@ class ManusSession:
 
 
 class ManusClient:
-    """High‑level API used by your Flask/FastAPI routes."""
+    """High‑level API used by your backend routes."""
 
     # ------------------- public sync -------------------
     def ask_manus(self, prompt: str, chat_id: str = "default") -> Dict[str, list]:
@@ -84,7 +84,7 @@ class ManusClient:
             + prompt
             + " (say END when you're done writing your final answer)"
         )
-        page, live_view = await self._get_or_create_page(chat_id, log)
+        page, _ = await self._get_or_create_page(chat_id, log)
 
         log(f"🧠 sending prompt → {prompt[:60]}…")
         input_box = await self._get_input_box(page)
@@ -93,11 +93,9 @@ class ManusClient:
 
         log("📡 waiting for END token…")
         seen = set()
-        for _ in range(60):
+        for _ in range(60):  # up to 2 min
             await page.wait_for_timeout(2000)
-            for block in await page.query_selector_all(
-                "div[data-message-id], div.prose"
-            ):
+            for block in await page.query_selector_all("div[data-message-id], div.prose"):
                 try:
                     text = await block.inner_text()
                     if text not in seen:
@@ -129,9 +127,7 @@ class ManusClient:
         seen = set()
 
         async def new_texts():
-            for block in await page.query_selector_all(
-                "div[data-message-id], div.prose"
-            ):
+            for block in await page.query_selector_all("div[data-message-id], div.prose"):
                 try:
                     text = await block.inner_text()
                     if text not in seen:
@@ -148,10 +144,7 @@ class ManusClient:
                     clean = txt.replace("END", "").strip()
                     yield {"type": "answer", "message": clean}
                     return
-        yield {
-            "type": "answer",
-            "message": "[❌] Manus response did not include END in time.",
-        }
+        yield {"type": "answer", "message": "[❌] Manus response did not include END in time."}
 
     # ------------------- helpers -------------------
     async def _get_or_create_page(self, chat_id: str, log):
@@ -188,43 +181,38 @@ class ManusClient:
         _session_cache[chat_id] = ManusSession(session.id, browser, page)
         return page, live_view
 
-    
-async def _get_input_box(self, page):
-    """Return a visible, enabled compose box on Manus (textarea or contenteditable)."""
-    # Try up to 10 seconds
-    for _ in range(20):
-        # check textareas
-        for handle in await page.query_selector_all("textarea"):
-            try:
-                if await handle.is_visible() and await handle.is_enabled():
-                    return handle
-            except Exception:
-                continue
-        # check contenteditable divs that aren't part of history
-        for handle in await page.query_selector_all('[contenteditable="true"]'):
-            try:
-                if await handle.is_visible() and await handle.is_enabled():
-                    return handle
-            except Exception:
-                continue
-        await page.wait_for_timeout(500)
-    raise RuntimeError("Could not find visible Manus compose box.")
-
+    async def _get_input_box(self, page: Page):
+        """Return visible & enabled compose box, scrolling into view if hidden."""
+        timeout_ms = 10000
+        interval = 500
+        elapsed = 0
+        while elapsed < timeout_ms:
+            for sel in ["textarea", "[contenteditable='true']"]:
+                for handle in await page.query_selector_all(sel):
+                    try:
+                        if await handle.is_enabled():
+                            await handle.scroll_into_view_if_needed()
+                            if await handle.is_visible():
+                                return handle
+                    except Exception:
+                        continue
+            await page.wait_for_timeout(interval)
+            elapsed += interval
+        raise RuntimeError("Could not find visible Manus compose box.")
 
     async def _is_logged_into_manus(self, page: Page) -> bool:
         try:
             await page.goto("https://manus.im/app", timeout=10000)
-            await page.wait_for_selector("textarea", timeout=10000)
+            await page.wait_for_selector("textarea, [contenteditable='true']", timeout=10000)
             return True
         except Exception:
             return False
 
-    # login flows
+    # ------------ login helpers ------------
     async def _google_login(self, page: Page, context, log):
         log("🔐 performing one-time Google login…")
         await page.goto(
-            "https://accounts.google.com/signin/v2/identifier?service=mail",
-            timeout=30000,
+            "https://accounts.google.com/signin/v2/identifier?service=mail", timeout=30000
         )
         await page.fill('input[type="email"]', MANUS_EMAIL)
         await page.click('button:has-text("Next")')
@@ -232,7 +220,6 @@ async def _get_input_box(self, page):
             'input[type="password"], input[name="Passwd"], input[autocomplete="current-password"]',
             timeout=15000,
         )
-        # Password field may vary
         if await page.locator('input[name="Passwd"]').is_visible(timeout=1000):
             await page.fill('input[name="Passwd"]', MANUS_PASSWORD)
         else:
@@ -240,7 +227,6 @@ async def _get_input_box(self, page):
         await page.click('button:has-text("Next")')
         await page.wait_for_timeout(5000)
 
-        # phone verify if triggered
         if await page.locator('input[type="tel"]').is_visible(timeout=5000):
             await page.fill('input[type="tel"]', VERIFICATION_PHONE)
             await page.keyboard.press("Enter")
