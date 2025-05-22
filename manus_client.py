@@ -162,3 +162,6 @@ async def stream_manus(self, prompt: str) -> AsyncGenerator[Dict[str, str], None
 
         # timeout
         yield {"type": "answer", "message": "[❌] Manus response timed out."}
+
+# -- legacy alias for older calls -----------------------------
+setattr(ManusClient, "stream_manus", ManusClient.stream_manus_frames)
