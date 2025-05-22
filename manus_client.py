@@ -2,9 +2,9 @@
 import asyncio
 import os
 import json
-from typing import AsyncGenerator, Dict, Optional
+from typing import AsyncGenerator, Dict
 from dotenv import load_dotenv
-from playwright.async_api import async_playwright, Page, Browser
+from playwright.async_api import async_playwright, Browser, Page
 from browserbase import Browserbase
 
 load_dotenv()
@@ -28,13 +28,12 @@ SYSTEM_CONTEXT = (
     "Do **NOT** ask the user follow-up questions or request clarification. "
 )
 
-# ── in‑memory session cache ────────────────────────────────────
+# ── session cache ──────────────────────────────────────────────
 _session_cache: Dict[str, 'ManusSession'] = {}
 
 
 class ManusSession:
-    """Keeps a persistent Browserbase page tied to a chat_id."""
-
+    """Persistent Browserbase tab tied to a chat_id."""
     def __init__(self, session_id: str, browser: Browser, page: Page):
         self.session_id = session_id
         self.browser = browser
@@ -48,123 +47,130 @@ class ManusSession:
 
 
 class ManusClient:
-    """High‑level API used by your backend routes."""
+    """High‑level API consumed by your backend routes."""
 
-    # ------------------- public sync -------------------
+    # ── public sync (batch) ────────────────────────────────────
     def ask_manus(self, prompt: str, chat_id: str = "default") -> Dict[str, list]:
         logs: list[str] = []
 
-        def log(line: str):
-            print(line)
-            logs.append(line)
+        def log(msg: str):
+            print(msg)
+            logs.append(msg)
 
         answer = asyncio.run(self._interact_with_manus(prompt, chat_id, log))
         return {"logs": logs, "answer": answer}
 
-    # ------------------- public stream -----------------
+    # ── public stream ─────────────────────────────────────────
     async def stream_manus(
         self, prompt: str, chat_id: str = "default"
     ) -> AsyncGenerator[Dict[str, str], None]:
         async for chunk in self._stream_interact_with_manus(prompt, chat_id):
             yield chunk
 
-    # ------------------- public stop -------------------
+    # ── public stop ───────────────────────────────────────────
     async def stop_session(self, chat_id: str = "default"):
         sess = _session_cache.pop(chat_id, None)
         if sess:
             await sess.close()
 
-    # ===================================================
-    # INTERNAL BELOW
-    # ===================================================
+    # ==========================================================
+    # internal helpers
+    # ==========================================================
 
-    async def _interact_with_manus(self, prompt: str, chat_id: str, log) -> str:
-        prompt = (
-            SYSTEM_CONTEXT
-            + prompt
-            + " (say END when you're done writing your final answer)"
-        )
-        page, _ = await self._get_or_create_page(chat_id, log)
+    # ---------- main interaction (batch) ----------
+    async def _interact_with_manus(self, prompt: str, chat_id: str, log):
+        prompt = SYSTEM_CONTEXT + prompt + " (say END when you're done writing your final answer)"
+        page, _ = await self._ensure_active_page(chat_id, log)
 
         log(f"🧠 sending prompt → {prompt[:60]}…")
-        input_box = await self._get_input_box(page)
-        await input_box.fill(prompt)
+        box = await self._get_input_box(page)
+        await box.fill(prompt)
         await page.keyboard.press("Enter")
 
         log("📡 waiting for END token…")
         seen = set()
-        for _ in range(60):  # up to 2 min
+        for _ in range(60):  # ≈2 min
             await page.wait_for_timeout(2000)
-            for block in await page.query_selector_all("div[data-message-id], div.prose"):
+            for el in await page.query_selector_all("div[data-message-id], div.prose"):
                 try:
-                    text = await block.inner_text()
-                    if text not in seen:
-                        seen.add(text)
-                        log(f"💬 {text.strip()}")
-                        if "END" in text:
-                            return text.replace("END", "").strip()
+                    txt = await el.inner_text()
+                    if txt not in seen:
+                        seen.add(txt)
+                        log(f"💬 {txt.strip()}")
+                        if "END" in txt:
+                            return txt.replace("END", "").strip()
                 except Exception:
                     continue
         return "[❌] Manus response did not include END in time."
 
+    # ---------- main interaction (stream) ----------
     async def _stream_interact_with_manus(
         self, prompt: str, chat_id: str
     ) -> AsyncGenerator[Dict[str, str], None]:
-        prompt = (
-            SYSTEM_CONTEXT
-            + prompt
-            + " (say END when you're done writing your final answer)"
-        )
-        page, live_view = await self._get_or_create_page(chat_id, lambda *_: None)
-        yield {"type": "log", "message": f"🔗 connected. live view: {live_view}"}
+        prompt = SYSTEM_CONTEXT + prompt + " (say END when you're done writing your final answer)"
+        page, live = await self._ensure_active_page(chat_id, lambda *_: None)
+        yield {"type": "log", "message": f"🔗 connected. live view: {live}"}
 
         yield {"type": "log", "message": f"🧠 sending prompt → {prompt[:60]}…"}
-        input_box = await self._get_input_box(page)
-        await input_box.fill(prompt)
+        box = await self._get_input_box(page)
+        await box.fill(prompt)
         await page.keyboard.press("Enter")
 
         yield {"type": "log", "message": "📡 waiting for END token…"}
         seen = set()
 
-        async def new_texts():
-            for block in await page.query_selector_all("div[data-message-id], div.prose"):
+        async def new_msgs():
+            for el in await page.query_selector_all("div[data-message-id], div.prose"):
                 try:
-                    text = await block.inner_text()
-                    if text not in seen:
-                        seen.add(text)
-                        yield text.strip()
+                    txt = await el.inner_text()
+                    if txt not in seen:
+                        seen.add(txt)
+                        yield txt.strip()
                 except Exception:
                     continue
 
         for _ in range(60):
             await page.wait_for_timeout(2000)
-            async for txt in new_texts():
+            async for txt in new_msgs():
                 yield {"type": "log", "message": f"💬 {txt}"}
                 if "END" in txt:
-                    clean = txt.replace("END", "").strip()
-                    yield {"type": "answer", "message": clean}
+                    cleaned = txt.replace("END", "").strip()
+                    yield {"type": "answer", "message": cleaned}
                     return
         yield {"type": "answer", "message": "[❌] Manus response did not include END in time."}
 
-    # ------------------- helpers -------------------
-    async def _get_or_create_page(self, chat_id: str, log):
-        # reuse if exists
+    # ---------- session management ----------
+    async def _ensure_active_page(self, chat_id: str, log):
+        # page alive?
         if chat_id in _session_cache:
             sess = _session_cache[chat_id]
-            return sess.page, f"https://browserbase.com/sessions/{sess.session_id}"
+            try:
+                if not sess.page.is_closed():
+                    return sess.page, f"https://browserbase.com/sessions/{sess.session_id}"
+            except Exception:
+                pass
+            # stale page: clean up
+            try:
+                await sess.close()
+            except Exception:
+                pass
+            _session_cache.pop(chat_id, None)
 
-        # else spin up new
+        # spin new
+        return await self._create_page(chat_id, log)
+
+    async def _create_page(self, chat_id: str, log):
         log("🚀 spinning up remote chromium session on Browserbase…")
         session = bb.sessions.create(project_id=BB_PROJECT_ID)
-        live_view = f"https://browserbase.com/sessions/{session.id}"
-        log(f"🔗 connected. live view: {live_view}")
+        live = f"https://browserbase.com/sessions/{session.id}"
+        log(f"🔗 connected. live view: {live}")
 
-        p = await async_playwright().start()
-        browser = await p.chromium.connect_over_cdp(session.connect_url)
+        pw = await async_playwright().start()
+        browser = await pw.chromium.connect_over_cdp(session.connect_url)
         context = browser.contexts[0] if browser.contexts else await browser.new_context()
         page = context.pages[0] if context.pages else await context.new_page()
 
-        # load cookies if they exist
+        # cookies
         if os.path.exists("state.json"):
             with open("state.json", "r", encoding="utf-8") as f:
                 cookies = json.load(f).get("cookies", [])
@@ -172,35 +178,34 @@ class ManusClient:
                     await context.add_cookies(cookies)
                     log("🔓 cookies loaded from state.json.")
 
-        # login if necessary
-        if not await self._is_logged_into_manus(page):
+        # ensure logged in
+        if not await self._is_logged_in(page):
             await self._google_login(page, context, log)
             await self._manus_login(page, log)
 
-        # store
         _session_cache[chat_id] = ManusSession(session.id, browser, page)
-        return page, live_view
+        return page, live
 
+    # ---------- DOM helpers ----------
     async def _get_input_box(self, page: Page):
-        """Return visible & enabled compose box, scrolling into view if hidden."""
-        timeout_ms = 10000
-        interval = 500
+        timeout = 10000
         elapsed = 0
-        while elapsed < timeout_ms:
+        step = 500
+        while elapsed < timeout:
             for sel in ["textarea", "[contenteditable='true']"]:
-                for handle in await page.query_selector_all(sel):
+                for h in await page.query_selector_all(sel):
                     try:
-                        if await handle.is_enabled():
-                            await handle.scroll_into_view_if_needed()
-                            if await handle.is_visible():
-                                return handle
+                        if await h.is_enabled():
+                            await h.scroll_into_view_if_needed()
+                            if await h.is_visible():
+                                return h
                     except Exception:
                         continue
-            await page.wait_for_timeout(interval)
-            elapsed += interval
-        raise RuntimeError("Could not find visible Manus compose box.")
+            await page.wait_for_timeout(step)
+            elapsed += step
+        raise RuntimeError("Couldn't locate visible compose box.")
 
-    async def _is_logged_into_manus(self, page: Page) -> bool:
+    async def _is_logged_in(self, page: Page) -> bool:
         try:
             await page.goto("https://manus.im/app", timeout=10000)
             await page.wait_for_selector("textarea, [contenteditable='true']", timeout=10000)
@@ -208,12 +213,10 @@ class ManusClient:
         except Exception:
             return False
 
-    # ------------ login helpers ------------
-    async def _google_login(self, page: Page, context, log):
-        log("🔐 performing one-time Google login…")
-        await page.goto(
-            "https://accounts.google.com/signin/v2/identifier?service=mail", timeout=30000
-        )
+    # ---------- login flows ----------
+    async def _google_login(self, page: Page, ctx, log):
+        log("🔐 Google sign‑in…")
+        await page.goto("https://accounts.google.com/signin/v2/identifier?service=mail", timeout=30000)
         await page.fill('input[type="email"]', MANUS_EMAIL)
         await page.click('button:has-text("Next")')
         await page.wait_for_selector(
@@ -232,11 +235,11 @@ class ManusClient:
             await page.keyboard.press("Enter")
             await page.wait_for_timeout(5000)
 
-        await context.storage_state(path="state.json")
-        log("🔒 google auth completed & cookies saved.")
+        await ctx.storage_state(path="state.json")
+        log("🔒 Google auth done & cookies saved.")
 
     async def _manus_login(self, page: Page, log):
-        log("📄 navigating to Manus login…")
+        log("📄 Manus login…")
         await page.goto("https://manus.im/login", timeout=30000)
         try:
             btn = page.locator("text=Sign up with Google")
