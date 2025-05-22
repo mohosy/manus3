@@ -188,21 +188,28 @@ class ManusClient:
         _session_cache[chat_id] = ManusSession(session.id, browser, page)
         return page, live_view
 
-    async def _get_input_box(self, page: Page):
-        # visible textarea first
-        try:
-            return await page.wait_for_selector("textarea:visible", timeout=5000)
-        except Exception:
-            pass
-        # fallback to contenteditable
-        try:
-            return await page.wait_for_selector(
-                '[contenteditable="true"]:visible', timeout=5000
-            )
-        except Exception:
-            pass
-        # any textarea
-        return await page.query_selector("textarea")
+    
+async def _get_input_box(self, page):
+    """Return a visible, enabled compose box on Manus (textarea or contenteditable)."""
+    # Try up to 10 seconds
+    for _ in range(20):
+        # check textareas
+        for handle in await page.query_selector_all("textarea"):
+            try:
+                if await handle.is_visible() and await handle.is_enabled():
+                    return handle
+            except Exception:
+                continue
+        # check contenteditable divs that aren't part of history
+        for handle in await page.query_selector_all('[contenteditable="true"]'):
+            try:
+                if await handle.is_visible() and await handle.is_enabled():
+                    return handle
+            except Exception:
+                continue
+        await page.wait_for_timeout(500)
+    raise RuntimeError("Could not find visible Manus compose box.")
+
 
     async def _is_logged_into_manus(self, page: Page) -> bool:
         try:
